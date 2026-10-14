@@ -1,6 +1,7 @@
 """Single-process pilot API with a bounded queue and isolated GDAL workers."""
 from __future__ import annotations
 import json
+import hmac
 import os
 import re
 import shutil
@@ -17,6 +18,7 @@ from typing import List, Optional
 from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from cloud_session import COOKIE, session_id, owner_id, browser_origin
 
 ROOT = Path(os.environ.get("QC_JOB_ROOT", str(Path(__file__).parent / "qc_jobs"))).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
@@ -34,16 +36,34 @@ router = APIRouter(prefix="/gdb", tags=["Cloud GDB QC"])
 
 
 def authorize(request: Request):
-    origin = request.headers.get("Origin")
-    allowed = {x.strip() for x in os.environ.get("QC_ALLOWED_ORIGINS", "*").split(",")}
-    if origin and origin not in allowed and "*" not in allowed:
-        raise HTTPException(403, "This frontend origin is not allowed by the GDB service.")
     if not API_KEY:
         raise HTTPException(503, "QC_API_KEY must be configured on the server before use.")
-    if API_KEY:
-        import hmac
-        if not hmac.compare_digest(request.headers.get("X-GDB-Key", "").encode("utf-8"), API_KEY.encode("utf-8")):
-            raise HTTPException(401, "Enter the GDB service access key.")
+    origin = request.headers.get("Origin")
+    allowed = {x.strip() for x in os.environ.get("QC_ALLOWED_ORIGINS", "").split(",") if x.strip()}
+    allowed.add(browser_origin(request))
+    if origin and origin not in allowed and "*" not in allowed:
+        raise HTTPException(403, "This frontend origin is not allowed by the QC service.")
+    key = request.headers.get("X-GDB-Key", "")
+    if key:
+        if hmac.compare_digest(key.encode("utf-8"), API_KEY.encode("utf-8")):
+            return "api-key"
+        raise HTTPException(401, "Invalid QC API key.")
+    sid = session_id(request.cookies.get(COOKIE, ""))
+    if sid is None:
+        raise HTTPException(401, "Open or reload the cloud portal to start your browser session.")
+    # Browser sessions are same-origin even if legacy API-key origins are allowed.
+    if origin and origin != browser_origin(request):
+        raise HTTPException(403, "Open the portal and QC service at the same cloud address.")
+    return owner_id(sid)
+
+
+def owned_job(job_id, owner):
+    path = job_dir(job_id)
+    saved = (path / "owner.json")
+    expected = read_json(saved).get("owner") if saved.exists() else None
+    if owner != "api-key" and owner != expected:
+        raise HTTPException(404, "Job not found or expired for this browser session.")
+    return path
 
 
 def job_dir(job_id):
@@ -66,7 +86,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def create_job(action):
+def create_job(action, owner):
     # Expire completed uploads/results after 24 hours. Never delete running tasks.
     with LOCK:
         for path in ROOT.iterdir():
@@ -83,6 +103,7 @@ def create_job(action):
         path = ROOT / job_id
         path.mkdir()
         ACTIVE.add(job_id)
+        write_json(path / "owner.json", {"owner": owner})
         write_json(path / "status.json", {"job_id": job_id, "action": action, "state": "preparing", "progress": 0, "message": "Receiving files"})
     return job_id, path
 
@@ -214,16 +235,16 @@ async def receive_upload(file, destination):
         path.unlink(missing_ok=True)
 
 
-def upload_reference(upload_id):
-    path = job_dir(upload_id)
+def upload_reference(upload_id, owner):
+    path = owned_job(upload_id, owner)
     state = read_json(path / "status.json")
     if state.get("action") != "inspect" or state.get("state") != "completed":
         raise HTTPException(400, "Load and inspect this GDB successfully before processing.")
     return read_json(path / "task.json")["gdb"], state["result"]["classes"]
 
 
-def copy_upload(upload_id, destination):
-    gdb, _ = upload_reference(upload_id)
+def copy_upload(upload_id, destination, owner):
+    gdb, _ = upload_reference(upload_id, owner)
     destination = Path(destination) / Path(gdb).name
     shutil.copytree(gdb, destination, ignore=shutil.ignore_patterns("*.lock"))
     return str(destination)
@@ -243,8 +264,8 @@ def health():
 
 
 @router.post("/inspect", dependencies=[Depends(authorize)])
-async def inspect(file: UploadFile = File(...)):
-    job_id, path = create_job("inspect")
+async def inspect(file: UploadFile = File(...), owner: str = Depends(authorize)):
+    job_id, path = create_job("inspect", owner)
     try:
         gdb = await receive_upload(file, path)
         return queue_job(job_id, {"action": "inspect", "gdb": str(gdb)})
@@ -256,16 +277,16 @@ async def inspect(file: UploadFile = File(...)):
 
 
 @router.post("/qc", dependencies=[Depends(authorize)])
-def submit_qc(request: QCRequest):
-    _, classes = upload_reference(request.input_upload_id)
-    upload_reference(request.schema_upload_id)
+def submit_qc(request: QCRequest, owner: str = Depends(authorize)):
+    _, classes = upload_reference(request.input_upload_id, owner)
+    upload_reference(request.schema_upload_id, owner)
     if request.selected and any(p not in {r["path"] for r in classes} for p in request.selected):
         raise HTTPException(400, "QC selections must reference inspected feature classes.")
-    job_id, path = create_job("qc")
+    job_id, path = create_job("qc", owner)
     try:
         with LOCK:
-            source = copy_upload(request.input_upload_id, path / "input")
-            schema = copy_upload(request.schema_upload_id, path / "schema")
+            source = copy_upload(request.input_upload_id, path / "input", owner)
+            schema = copy_upload(request.schema_upload_id, path / "schema", owner)
         return queue_job(job_id, {"action": "qc", "input_gdb": source, "schema_gdb": schema,
                                   "short_limit_m": request.short_limit_m, "selected": request.selected})
     except Exception:
@@ -276,8 +297,8 @@ def submit_qc(request: QCRequest):
 
 
 @router.get("/jobs/{job_id}", dependencies=[Depends(authorize)])
-def job_status(job_id: str):
-    path = job_dir(job_id)
+def job_status(job_id: str, owner: str = Depends(authorize)):
+    path = owned_job(job_id, owner)
     status = read_json(path / "status.json")
     if status.get("state") == "running" and (path / "worker_status.json").exists():
         status.update(read_json(path / "worker_status.json"))
@@ -285,8 +306,8 @@ def job_status(job_id: str):
 
 
 @router.get("/jobs/{job_id}/download/{filename}", dependencies=[Depends(authorize)])
-def download(job_id: str, filename: str):
-    path = job_dir(job_id)
+def download(job_id: str, filename: str, owner: str = Depends(authorize)):
+    path = owned_job(job_id, owner)
     status = read_json(path / "status.json")
     names = {r["name"] for r in status.get("result", {}).get("artifacts", [])}
     if status.get("state") not in {"completed", "completed_with_warnings"} or filename not in names:

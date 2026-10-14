@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from cloud_gdb_router import router, restore_job_states, MAX_UPLOAD, authorize
 from cloud_gdb_worker import engine_health
+from cloud_session import issue_cookie
 
 
 @asynccontextmanager
@@ -19,7 +20,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Open-source GDB QC", lifespan=lifespan)
-origins = [x.strip() for x in os.environ.get("QC_ALLOWED_ORIGINS", "*").split(",") if x.strip()]
+origins = [x.strip() for x in os.environ.get("QC_ALLOWED_ORIGINS", "").split(",") if x.strip()]
 
 
 
@@ -67,5 +68,11 @@ def readiness():
 
 
 @app.get("/", include_in_schema=False)
-def index():
-    return FileResponse(Path(__file__).with_name("index.html"), media_type="text/html")
+def index(request: Request):
+    response = FileResponse(Path(__file__).with_name("index.html"), media_type="text/html")
+    return issue_cookie(response, request)
+
+
+@app.get("/index.html", include_in_schema=False)
+def index_file(request: Request):
+    return index(request)

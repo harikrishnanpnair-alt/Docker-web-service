@@ -2,25 +2,33 @@
 
 This package replaces the GDB QC ArcPy engine with Python, GDAL/OGR OpenFileGDB, Shapely and pyproj. It runs on a Linux cloud server. Users upload two ZIP files through the browser and download an Excel report. No ArcGIS installation or Windows Python clone is required for QC.
 
-## Start here — Render deployment
+## Cloud-only automatic connection update
 
-Create a **new QC service** for this first trial. The package is a complete standalone service, not a patch for an unseen conversion backend `main.py`.
+The portal now runs from the QC backend itself. `index.html` uses its own browser origin for QC requests; there are no URL or access-key entry fields. The server creates an anonymous, signed HttpOnly browser session when `/` or `/index.html` is opened. `QC_API_KEY` stays in Render and is used to sign sessions. It is never inserted in HTML.
 
-1. Extract this ZIP. Upload the contents of `gdb_qc_cloud` to a new GitHub repository. `Dockerfile`, `main.py`, `requirements.txt`, the other Python files and `index.html` must be at the repository root. Include `.dockerignore` as well.
-2. In Render, choose **New → Web Service**, connect that repository, and select **Docker** as the language/runtime. If shown, set Dockerfile Path to `./Dockerfile`. Leave any custom Docker Command blank; the Dockerfile already starts the server.
-3. Set **QC_API_KEY** to a long random secret of your own in Render's environment settings. Set **QC_ALLOWED_ORIGINS** to your existing portal's origin, e.g. `https://your-portal.example`, without a page path or trailing slash. Comma-separate multiple origins. For the first trial, `*` allows any browser origin but still requires the key. Do not put the secret in GitHub or hardcode it in the HTML.
-4. Set **Health Check Path** to `/health`, then deploy. The server listens on Render's `PORT`. It runs one web worker and one sequential processing queue.
-5. Copy the actual HTTPS service URL shown by Render. Replace the current portal's `index.html` with the included updated file. In **GDB QC Check**, enter the new URL and the same key, then click **Check connection**. A successful check displays `GDAL` and its version. The example URL in the field is a placeholder, not a deployed service.
-6. ZIP the entire input `.gdb` folder, including its internal files. Do the same for the reference schema `.gdb`. Upload them separately using **Load input classes** and **Load reference schema**. Select classes, set the short-line threshold, then click **Run QC & generate Excel**.
-7. Download **QC Excel report** and optionally **QC summary JSON**. Review `Summary`, `Check_Coverage`, `Run_Details` and the linked detail sheets.
+This is a public trial portal: anyone who can open the service URL can start a browser session and submit QC jobs. Jobs, uploads and downloads are restricted to the browser session that created them. This is session separation, not user authentication. The API-key interface is retained for trusted administrative clients; a valid key can access jobs across sessions.
 
-You can also open the new QC service URL directly: it serves the same portal. Its QC URL field still needs the deployed URL and key. Key and connection fields are not saved in browser storage.
+GDB Transfer is disabled with a Coming soon label in this cloud-only index. Its ArcPy backend has not been converted. The conversion, map, terrain profile, Excel and CAD tools remain in the portal and use the existing conversion service.
+
+## Update your existing Render service
+
+1. Extract this package and upload **all files inside `gdb_qc_cloud`** to the root of your existing `Docker-web-service` GitHub repository. Replace the old files and include the new `cloud_session.py` file. Do not upload only `index.html`: the updated backend is required for automatic sessions and job separation.
+2. Keep the `QC_API_KEY` already configured in Render. Choose a private random secret if it has not yet been set. Users will not need to see or enter this value.
+3. Keep the Docker runtime, Dockerfile path `./Dockerfile`, and health-check path `/health`. Leave custom Docker Command blank. Commit/push the files and let Render deploy, or use Manual Deploy → Deploy latest commit.
+4. Open the actual Render web service URL directly in your browser. Bookmark it and use that page as the portal. Do not open this index by double-clicking a downloaded HTML file, or host it on an unrelated static website: QC uses the address it was opened from.
+5. Click **GDB QC Check**. The page checks the cloud service automatically. You should see `Cloud ready · GDAL ...` without entering any connection settings. Refresh connection can be used if the server is waking.
+6. ZIP the entire input `.gdb` folder and reference schema `.gdb` folder separately, including their internal files. Use **Load input classes** and **Load reference schema**, select classes and the short-line threshold, then click **Run QC & generate Excel**.
+7. Download the Excel and optional JSON report. Review `Summary`, `Check_Coverage`, `Run_Details` and the linked detail sheets.
+
+Browser sessions last 24 hours and are renewed when the portal is reopened. Reopening it in the same browser retains the session owner while the session is valid. Another browser/private window gets its own session. Clearing cookies or allowing the session to expire removes access to that browser's previous jobs; upload and run again. Cookies must be enabled.
+
+The service automatically accepts the origin it serves. `QC_ALLOWED_ORIGINS` is only needed for additional API-key clients and can be left unset for this portal. Browser-session requests always require the portal's own origin, even if extra API-key origins are configured. The existing conversion backend may need its allowed origins updated if it restricts requests from the new portal address.
 
 Render Docker guidance: https://render.com/docs/docker
 Render Web Service setup: https://render.com/docs/web-services
 Health checks: https://render.com/docs/health-checks
 
-The existing conversion/profile API remains `https://gis-processing-backend.onrender.com`. GDB Transfer retains its separate ArcGIS service settings. Transfer has not been rewritten in this update.
+The original conversion/profile API remains `https://gis-processing-backend.onrender.com`. This package still runs as a separate QC service, rather than replacing the conversion backend.
 
 ## QC checks in this version
 
@@ -47,13 +55,14 @@ Workbook styling follows the earlier blue-header QC report. Known issue indicato
 - Pilot defaults: 128 MB per ZIP, 1 GB extracted per GDB, 250,000 selected features, 50,000 workbook detail rows, 10 admitted jobs, one processing job at a time and 30-minute processing timeout. Full summary counts are retained when detail rows are capped; omitted-row counts appear in `Check_Coverage`.
 - Private GDB copies can use substantial disk space. Start with small files, measure memory/disk use and choose cloud resources based on your own data. The Docker image has not been built or deployed to Render from this workspace.
 - Jobs/uploads/results use local server disk. Completed job folders expire after 24 hours, with cleanup triggered on a new submission. Restarted in-flight jobs become failed; on ephemeral hosting, redeployment may also remove uploads/results. Download promptly.
-- This is a shared-key trial for a trusted team: everyone with the key has the same service access. It has no per-user accounts, ownership or billing limits. It is not a validated 100-user deployment. Multiple web workers/instances need an external queue, job store and per-user access controls; do not increase `--workers` on this implementation.
+- This is a public trial with browser-session job separation, not per-user accounts or billing limits. It is not a validated 100-user deployment. Administrative API-key requests can access all jobs. Multiple web workers/instances need an external queue and job store; do not increase `--workers` on this implementation.
 - Synthetic real GDB tests passed. Your actual GDB files have not been provided or validated; compare initial cloud results against your existing QC tool, especially subtype/domain rules, before adopting it for project sign-off.
 
 ## Files
 
-- `index.html`: complete updated menu/portal.
-- `main.py`: FastAPI app, CORS, request-size limit and public readiness check.
+- `index.html`: complete cloud-only portal with automatic same-origin QC requests.
+- `main.py`: FastAPI app, session-setting index route, CORS, request-size limit and public readiness check.
+- `cloud_session.py`: signed browser sessions; keeps the signing key on the server.
 - `cloud_gdb_router.py`: authenticated inspection/QC queue, bounded ZIP extraction, status and downloads.
 - `cloud_gdb_worker.py`: isolated processing process.
 - `cloud_gdb_common.py`: read-only GDB inventory and layer XML metadata.
@@ -68,7 +77,7 @@ Do not copy only `main.py`: it imports the accompanying modules. Do not replace 
 | Variable | Default |
 |---|---|
 | QC_API_KEY | Required; service refuses startup without it |
-| QC_ALLOWED_ORIGINS | `*` |
+| QC_ALLOWED_ORIGINS | Unset; own portal origin is accepted automatically |
 | QC_MAX_UPLOAD_MB | `128` |
 | QC_MAX_UNPACKED_MB | `1024` |
 | QC_MAX_TOTAL_FEATURES | `250000` |
@@ -86,4 +95,4 @@ docker build -t gdb-qc-cloud .
 docker run --rm -p 8000:8000 -e QC_API_KEY=YOUR_OWN_SECRET -e QC_ALLOWED_ORIGINS=http://localhost:8000 gdb-qc-cloud
 ```
 
-Open `http://localhost:8000`, then enter that same address in Cloud QC service URL and your secret in the key field.
+Open `http://localhost:8000` directly. The portal connects automatically; local Docker is only an optional developer test. End users use the deployed cloud URL.

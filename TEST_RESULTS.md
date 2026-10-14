@@ -10,7 +10,10 @@ Passed:
 - Input GDB file hashes unchanged after QC; Excel opens with summary/details and no executable formulas from source text.
 - Authenticated upload, inspection, subprocess QC, polling and Excel download through the FastAPI test client.
 - Access-key and origin rejection, preflight CORS, invalid selection/threshold, unsafe ZIP rejection, size limit and download allowlist.
-- Browser DOM simulation: cloud QC requests go to the QC URL/key; Transfer uses its own service; connection changes reset the relevant data.
+- Browser DOM simulation: QC requests automatically use the page origin and browser session, with no access-key header or URL/key fields. Local Transfer is disabled. Upload, run, download, navigation and expired-session handling passed.
+- Automatic session creation, HttpOnly/Secure/SameSite settings, same-browser owner retention on reload and cross-origin rejection passed.
+- Two separate browser clients: the second client cannot view, reuse or download the first client's QC jobs; the full session-based upload-to-Excel flow passed with real synthetic GDBs.
+- Existing administrative API-key requests still pass the API validation tests.
 - Existing profile Excel export, requested/actual gaps, missing elevations and stale-response handling.
 - Existing CAD profile settings and export, including a long route; both generated DXFs pass ezdxf audit.
 
